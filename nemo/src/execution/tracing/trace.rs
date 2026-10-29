@@ -370,20 +370,32 @@ impl ExecutionTrace {
         &self,
         fact_handles: &[TraceFactHandle],
     ) -> ExecutionTraceListOfInferences {
+        let is_success = |handle: &TraceFactHandle| self.get_fact(*handle).status().is_success();
+
         let mut final_conclusions = Vec::<GroundAtom>::new();
-        let mut fact_stack = fact_handles.to_vec();
+        // Facts that could not be derived never enter the stack:
+        // they have no inference, and all premises of a successful
+        // derivation are themselves successful
+        let mut fact_stack = fact_handles
+            .iter()
+            .copied()
+            .filter(is_success)
+            .collect::<Vec<_>>();
         let mut inferences = Vec::<ExecutionTraceInference>::new();
         let mut inferred_conclusions = HashSet::<TraceFactHandle>::new();
 
         for &final_handle in fact_handles {
-            let mut successful_derivation = true;
+            if !is_success(&final_handle) {
+                continue;
+            }
+            final_conclusions.push(self.get_fact(final_handle).fact().clone());
+
             fact_stack.push(final_handle);
 
             while let Some(current_fact) = fact_stack.pop() {
-                if inferred_conclusions.contains(&current_fact) {
+                if !inferred_conclusions.insert(current_fact) {
                     continue;
                 }
-                inferred_conclusions.insert(current_fact);
 
                 let traced_fact = self.get_fact(current_fact);
 
@@ -394,14 +406,7 @@ impl ExecutionTrace {
                     if let TraceDerivation::Derived(_, handles_derived) = derivation {
                         fact_stack.extend(handles_derived);
                     }
-                } else {
-                    successful_derivation = false;
-                    break;
                 }
-            }
-
-            if successful_derivation {
-                final_conclusions.push(self.get_fact(final_handle).fact().clone());
             }
         }
 
@@ -485,7 +490,7 @@ mod test {
         },
     };
 
-    use super::ExecutionTrace;
+    use super::{ExecutionTrace, TraceFactHandle};
 
     macro_rules! variable_assignment {
         ($($k:expr => $v:expr),*) => {{
@@ -602,6 +607,58 @@ mod test {
 
         let expected_json = r#"{"finalConclusion":["R(b, a)","P(b, a)"],"inferences":[{"rule":"R(?x, ?y) :- P(?x, ?y), S(?y) .","conclusion":"R(b, a)","premises":["P(b, a)","S(a)"]},{"rule":"S(?x) :- T(?x) .","conclusion":"S(a)","premises":["T(a)"]},{"rule":"Asserted","conclusion":"T(a)","premises":[]},{"rule":"P(?x, ?y) :- Q(?y, ?x) .","conclusion":"P(b, a)","premises":["Q(a, b)"]},{"rule":"Asserted","conclusion":"Q(a, b)","premises":[]}]}"#.to_string();
         let computed_json = serde_json::to_string(&trace.json(&trace_handles)).unwrap();
+
+        assert_eq!(expected_json, computed_json);
+    }
+
+    /// Return [test_trace] together with the handle of a fact
+    /// that could not be derived.
+    fn test_trace_with_failure() -> (ExecutionTrace, TraceFactHandle) {
+        let mut trace = test_trace();
+
+        let r_ab = GroundAtom::try_from(Atom::parse("R(a,b)").unwrap()).unwrap();
+        let trace_r_ab = trace.register_fact(r_ab);
+        trace.update_status(trace_r_ab, TraceStatus::Fail);
+
+        (trace, trace_r_ab)
+    }
+
+    /// Expected json for tracing only `R(b, a)` in [test_trace]
+    const EXPECTED_JSON_R_BA: &str = r#"{"finalConclusion":["R(b, a)"],"inferences":[{"rule":"R(?x, ?y) :- P(?x, ?y), S(?y) .","conclusion":"R(b, a)","premises":["P(b, a)","S(a)"]},{"rule":"S(?x) :- T(?x) .","conclusion":"S(a)","premises":["T(a)"]},{"rule":"Asserted","conclusion":"T(a)","premises":[]},{"rule":"P(?x, ?y) :- Q(?y, ?x) .","conclusion":"P(b, a)","premises":["Q(a, b)"]},{"rule":"Asserted","conclusion":"Q(a, b)","premises":[]}]}"#;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn trace_json_derived_then_failed() {
+        let (trace, trace_r_ab) = test_trace_with_failure();
+
+        let r_ba = GroundAtom::try_from(Atom::parse("R(b,a)").unwrap()).unwrap();
+        let trace_r_ba = trace.find_fact(&r_ba).unwrap();
+
+        let computed_json = serde_json::to_string(&trace.json(&[trace_r_ba, trace_r_ab])).unwrap();
+
+        assert_eq!(EXPECTED_JSON_R_BA, computed_json);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn trace_json_failed_then_derived() {
+        let (trace, trace_r_ab) = test_trace_with_failure();
+
+        let r_ba = GroundAtom::try_from(Atom::parse("R(b,a)").unwrap()).unwrap();
+        let trace_r_ba = trace.find_fact(&r_ba).unwrap();
+
+        let computed_json = serde_json::to_string(&trace.json(&[trace_r_ab, trace_r_ba])).unwrap();
+
+        assert_eq!(EXPECTED_JSON_R_BA, computed_json);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn trace_json_failed_twice() {
+        let (trace, trace_r_ab) = test_trace_with_failure();
+
+        let expected_json = r#"{"finalConclusion":[],"inferences":[]}"#;
+        let computed_json = serde_json::to_string(&trace.json(&[trace_r_ab, trace_r_ab])).unwrap();
 
         assert_eq!(expected_json, computed_json);
     }
