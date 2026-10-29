@@ -11,10 +11,7 @@ use crate::{
         execution_engine::tracing::simple::storage::{
             ExecutionTrace, TraceDerivation, TraceFactHandle, TraceRuleApplication, TraceStatus,
         },
-        planning::{
-            normalization::{atom::ground::GroundAtom, program::NormalizedProgram},
-            strategy::tracing::StrategyTracing,
-        },
+        planning::{normalization::atom::ground::GroundAtom, strategy::tracing::StrategyTracing},
         selection_strategy::strategy::RuleSelectionStrategy,
         tracing::error::TracingError,
     },
@@ -39,7 +36,6 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         &mut self,
         trace: &mut ExecutionTrace,
         fact: &GroundAtom,
-        program: &NormalizedProgram,
     ) -> Result<TraceFactHandle, TracingError> {
         let trace_handle = trace.register_fact(fact.clone());
 
@@ -64,14 +60,20 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
 
         // If the traced fact is edb or derived at step 0,
         // then the derivation was successful
-        if !program.derived_predicates().contains(&fact.predicate()) || step == 0 {
+        if !self
+            .program
+            .derived_predicates()
+            .contains(&fact.predicate())
+            || step == 0
+        {
             trace.update_status(trace_handle, TraceStatus::Success(TraceDerivation::Input));
             return Ok(trace_handle);
         }
 
-        // Rule index of the rule that was applied to derive the given fact
+        // Rule that was applied to derive the given fact;
+        // cloned because the recursive calls below borrow `self` mutably
         let rule_index = self.rule_history[step];
-        let rule = program.rules()[rule_index].clone();
+        let rule = self.program.rules()[rule_index].clone();
 
         // Iterate over all head atoms which could have derived the given fact
         for (head_index, head_atom) in rule.head().iter().enumerate() {
@@ -121,7 +123,6 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
                 continue;
             }
 
-            let rule = program.rules()[rule_index].clone();
             let trace_strategy = StrategyTracing::new(&rule, grounding);
             let trace_output_variables = trace_strategy.output_variables();
 
@@ -150,8 +151,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
 
                     let next_fact = GroundAtom::new(next_fact_predicate, next_fact_terms);
 
-                    let next_handle =
-                        Box::pin(self.trace_recursive(trace, &next_fact, program)).await?;
+                    let next_handle = Box::pin(self.trace_recursive(trace, &next_fact)).await?;
 
                     if trace.status(next_handle).is_success() {
                         subtraces.push(next_handle);
@@ -264,10 +264,7 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
                 );
             }
 
-            handles.push(
-                self.trace_recursive(trace, ground_fact, &self.program.clone())
-                    .await?,
-            );
+            handles.push(self.trace_recursive(trace, ground_fact).await?);
         }
 
         log::info!("{num_ground_facts}/{num_ground_facts} facts traced. (100%)");
