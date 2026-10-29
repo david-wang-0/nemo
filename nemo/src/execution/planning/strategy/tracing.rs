@@ -45,7 +45,21 @@ impl StrategyTracing {
         let ranges = vec![UnionRange::Old; positive.len()];
         let mut negative = rule.negative().clone();
         let mut operations = rule.operations().clone();
-        let order = rule.variable_order();
+
+        // Join the variables bound by the traced fact first,
+        // so that the join seeks their values instead of enumerating
+        // all assignments of the other variables for every traced fact.
+        // Since bound variables take a single value, this does not change
+        // which match is found first.
+        let body_variables = positive
+            .iter()
+            .flat_map(|atom| atom.terms())
+            .collect::<HashSet<_>>();
+        let (bound, unbound): (Vec<&Variable>, Vec<&Variable>) =
+            rule.variable_order().iter().partition(|variable| {
+                grounding.contains_key(*variable) && body_variables.contains(*variable)
+            });
+        let order = &VariableOrder::new(bound.into_iter().chain(unbound).cloned());
 
         for (variable, value) in grounding {
             let new_operation =
@@ -134,5 +148,43 @@ impl StrategyTracing {
     ) -> Result<Vec<Trie>, Error> {
         let plan = self.crate_plan(table_manager, step);
         table_manager.execute_plan_trie(plan).await
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::HashMap;
+
+    use nemo_physical::datavalues::AnyDataValue;
+
+    use crate::{
+        api::load_program_handle, execution::planning::normalization::program::NormalizedProgram,
+    };
+
+    use super::StrategyTracing;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn tracing_joins_bound_variables_first() {
+        let program = r#"e(1, 2) .
+            e(2, 3) .
+            q(?x) :- e(?x, ?y), e(?y, ?z) .
+            @output q ."#;
+        let handle = load_program_handle(program.to_string(), String::default())
+            .expect("program parses and validates");
+        let normalized = NormalizedProgram::normalize_program(&handle);
+        let rule = &normalized.rules()[0];
+
+        let x = rule
+            .variables()
+            .find(|variable| variable.name() == Some("x"))
+            .expect("rule contains ?x")
+            .clone();
+        let grounding = HashMap::from([(x.clone(), AnyDataValue::new_integer_from_i64(1))]);
+
+        let order = StrategyTracing::new(rule, grounding).output_variables();
+
+        assert_eq!(order.len(), 3);
+        assert_eq!(order[0], x);
     }
 }

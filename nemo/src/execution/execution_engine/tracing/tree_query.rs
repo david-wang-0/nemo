@@ -160,10 +160,11 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
         grounding: &[AnyDataValue],
         next_facts: &mut [Vec<GroundAtom>],
         rule: &NormalizedRule,
-        variables: Vec<Variable>,
+        variables: &[Variable],
     ) {
         let variable_assignment: HashMap<Variable, AnyDataValue> = variables
-            .into_iter()
+            .iter()
+            .cloned()
             .zip(grounding.iter().cloned())
             .collect();
 
@@ -305,11 +306,13 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
             };
 
             let mut query_results = Vec::new();
+            let mut results_variables = Vec::new();
 
             for (partial_grounding, &step) in combination.into_iter().zip(steps.iter()) {
                 let rule = &self.chase_program().rules()[rule_index];
 
                 let trace_strategy = StrategyTracing::new(rule, partial_grounding);
+                let tracing_variables = trace_strategy.output_variables();
 
                 // Here, we simply compute all results to iterate over each
                 // possible grounding (as different groundings may lead to different results)
@@ -321,6 +324,9 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
                     .unwrap();
 
                 query_results.push(query_result);
+                // The columns of each result are labeled by the variables
+                // of the strategy that computed it, as their order depends on the grounding
+                results_variables.push(tracing_variables);
             }
 
             let results = query_results
@@ -346,11 +352,9 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
                         .count()
                 ];
 
-                for groundings in results {
+                for (groundings, tracing_variables) in results.into_iter().zip(&results_variables) {
                     for grounding in groundings {
                         let rule = &self.chase_program().rules()[rule_index];
-                        let tracing_variables =
-                            StrategyTracing::new(rule, HashMap::default()).output_variables();
 
                         Self::trace_next_facts(
                             &grounding,
@@ -395,10 +399,10 @@ impl<Strategy: RuleSelectionStrategy> ExecutionEngine<Strategy> {
                             .count()
                     ];
 
-                    for grounding in groundings {
+                    for (grounding, tracing_variables) in
+                        groundings.into_iter().zip(&results_variables)
+                    {
                         let rule = &self.chase_program().rules()[rule_index];
-                        let tracing_variables =
-                            StrategyTracing::new(rule, HashMap::default()).output_variables();
                         Self::trace_next_facts(
                             &grounding,
                             &mut next_facts,
